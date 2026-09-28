@@ -27,8 +27,7 @@ export function GroupsPage() {
       <table>
         <thead>
           <tr>
-            <th>ID</th>
-            <th>网关群 ID</th>
+            <th>群</th>
             <th>状态</th>
             <th>成员数</th>
             <th>Agent</th>
@@ -38,8 +37,7 @@ export function GroupsPage() {
         <tbody>
           {groups.data?.map((g) => (
             <tr key={g.id}>
-              <td><Link to={`/groups/${g.id}`}>{g.id}</Link></td>
-              <td>{g.gatewayGroupId ?? '—'}</td>
+              <td><Link to={`/groups/${g.id}`}>{g.gatewayGroupId ?? '（创建中）'}</Link> <span className="muted small">{g.id.slice(0, 8)}</span></td>
               <td><StatusBadge status={g.status} /></td>
               <td>{g.members.length}</td>
               <td>{g.agentEnabled ? '开' : '关'}</td>
@@ -48,7 +46,7 @@ export function GroupsPage() {
           ))}
         </tbody>
       </table>
-      {groups.data?.length === 0 && <p className="muted">暂无群组</p>}
+      {groups.data?.length === 0 && <p className="muted">还没有群组。建群需要群主和成员账号都在线——先去 <Link to="/accounts">账号</Link> 页连接账号。</p>}
     </section>
   );
 }
@@ -58,7 +56,11 @@ function CreateGroupForm({ onCreated }: { onCreated: () => void }) {
   const [creatorId, setCreatorId] = useState('');
   const [memberIds, setMemberIds] = useState<Set<string>>(new Set());
   const [submitError, setSubmitError] = useState<unknown>(null);
-  const job = useJob(onCreated);
+  const job = useJob((done) => {
+    if (done.status === 'finished') { setCreatorId(''); setMemberIds(new Set()); }
+    accounts.reload();
+    onCreated();
+  });
 
   const toggleMember = (id: string) =>
     setMemberIds((prev) => {
@@ -82,17 +84,24 @@ function CreateGroupForm({ onCreated }: { onCreated: () => void }) {
 
   const running = job.job?.status === 'running';
   const label = (a: Account) => `${a.id}${a.platformUserId ? ` (${a.platformUserId})` : ''} · ${a.status}`;
+  // The server requires every account to be online (422 otherwise) — say so up front instead of after submit.
+  const online = (a: Account) => a.status === 'online';
+  const onlineCount = accounts.data?.filter(online).length ?? 0;
 
   return (
     <form className="card" onSubmit={onSubmit}>
       <h3>创建群组</h3>
       <ErrorText error={accounts.error} />
+      {accounts.data && onlineCount < 2 && (
+        <p className="banner banner-info">建群至少需要 2 个在线账号（1 个群主 + 1 个成员），当前在线 {onlineCount} 个。去 <Link to="/accounts">账号</Link> 页点「重连」。</p>
+      )}
+      <p className="muted small">第一个勾选的成员会被提升为管理员（admin）。</p>
       <label>
         群主账号
         <select value={creatorId} onChange={(e) => setCreatorId(e.target.value)} required>
           <option value="">— 选择 —</option>
           {accounts.data?.map((a) => (
-            <option key={a.id} value={a.id}>{label(a)}</option>
+            <option key={a.id} value={a.id} disabled={!online(a)}>{label(a)}</option>
           ))}
         </select>
       </label>
@@ -102,14 +111,17 @@ function CreateGroupForm({ onCreated }: { onCreated: () => void }) {
           ?.filter((a) => a.id !== creatorId)
           .map((a) => (
             <label key={a.id} className="inline">
-              <input type="checkbox" checked={memberIds.has(a.id)} onChange={() => toggleMember(a.id)} />
-              {label(a)}
+              <input type="checkbox" checked={memberIds.has(a.id)} onChange={() => toggleMember(a.id)} disabled={!online(a)} />
+              <span className={online(a) ? undefined : 'muted'}>{label(a)}</span>
             </label>
           ))}
       </fieldset>
       <button type="submit" disabled={!creatorId || running}>创建</button>
       <ErrorText error={submitError} />
       <JobProgress label="建群" job={job.job} pollError={job.pollError} />
+      {job.job?.status === 'finished' && job.job.groupId && (
+        <p>群已建好 → <Link to={`/groups/${job.job.groupId}`}>打开群详情</Link></p>
+      )}
     </form>
   );
 }

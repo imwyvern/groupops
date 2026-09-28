@@ -176,3 +176,15 @@ tr.raw-row td { background: #fafafa; }
   color: var(--red);
 }
 .placeholder-error .big { font-size: 18px; font-weight: 700; }
+
+/* message provenance */
+.msg-sender { font-weight: 600; }
+.src-tag { font-size: 11px; padding: 0 6px; border-radius: 8px; line-height: 18px; }
+.src-operator { background: #e8eefc; color: #2f4fb8; }
+.src-agent { background: #f3e8fd; color: #7a2fb8; }
+.src-sequence { background: #fdf2e3; color: #9a5b00; }
+
+.banner { padding: 10px 14px; border-radius: 8px; margin: 12px 0; }
+.banner-danger { background: #fdecec; border: 1px solid #e5484d; color: #a4161a; font-weight: 600; }
+.banner-info { background: #eef4ff; border: 1px solid #b8ccf5; color: #1d3f91; }
+.trigger-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }

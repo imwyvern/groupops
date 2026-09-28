@@ -42,6 +42,7 @@ export type JobStatus = 'running' | 'finished' | 'failed';
 
 export interface Job {
   status: JobStatus;
+  groupId?: string | null;
   errors: { step: string; code: string }[];
 }
 
@@ -57,6 +58,10 @@ export interface Message {
   sentAt: string | null;
   deliveryStatus: DeliveryStatus | null;
   failCode: string | null;
+  /** Service account that sent it (own messages only). */
+  accountId: string | null;
+  /** Who initiated an own message: operator | agent | sequence (external = echo with no outbox row). */
+  source: 'operator' | 'agent' | 'sequence' | 'external' | null;
 }
 
 export interface MessagePage {
@@ -87,8 +92,18 @@ export interface AgentStep {
   rawResponse: string | null;
 }
 
+export interface TriggerMessage {
+  msgId: string;
+  senderPlatformUserId: string;
+  text: string;
+  sentAt: string;
+}
+
 export interface AgentRunDetail extends Omit<AgentRunSummary, 'createdAt'> {
   createdAt?: string;
+  finishedAt?: string | null;
+  stepCount?: number;
+  triggerMessages?: TriggerMessage[];
   steps: AgentStep[];
 }
 
@@ -127,6 +142,8 @@ export interface SequenceRunStep {
   scheduledAt: string | null;
   sentAt: string | null;
   clientMsgId: string | null;
+  /** Final text with placeholders resolved (what is / was actually sent). */
+  text?: string;
   resolvedVars: Vars;
   varSources: Record<string, VarSource>;
 }

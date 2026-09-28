@@ -9,6 +9,9 @@ import { useResync, useWsEvent } from '../ws/WsProvider';
 import { ErrorText } from './ErrorText';
 import { StatusBadge } from './StatusBadge';
 
+/** Own messages say who initiated them, so the operator can tell the bot's words from their own. */
+const SOURCE_LABEL: Record<string, string> = { operator: '操作员', agent: 'Agent', sequence: '序列' };
+
 /**
  * Message history for one group.
  *
@@ -99,7 +102,8 @@ export function MessageTimeline({ groupId, members, canSend }: { groupId: string
         {messages.map((m) => (
           <div key={m.id} className={`msg ${m.isOwn ? 'msg-own' : ''}`}>
             <div className="msg-meta">
-              <span>{m.senderPlatformUserId ?? '未知发送者'}</span>
+              <span className="msg-sender">{m.isOwn && m.accountId ? m.accountId : m.senderPlatformUserId ?? '未知发送者'}</span>
+              {m.isOwn && m.source && SOURCE_LABEL[m.source] && <span className={`src-tag src-${m.source}`}>{SOURCE_LABEL[m.source]}</span>}
               <span>{formatTime(m.sentAt)}</span>
               {m.isOwn && <StatusBadge status={m.deliveryStatus} />}
               {m.isOwn && m.failCode && <code className="fail-code">{m.failCode}</code>}

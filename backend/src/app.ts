@@ -160,6 +160,7 @@ export function buildApp() {
       items: page.map((m) => ({
         id: m.id, msgId: m.msg_id, clientMsgId: m.client_msg_id, senderPlatformUserId: m.sender_platform_user_id, isOwn: m.is_own,
         text: m.text, sentAt: iso(m.sent_at), deliveryStatus: m.delivery_status, failCode: m.fail_code, mediaUrl: m.media_url,
+        accountId: m.account_id, source: m.source ?? (m.is_own ? 'external' : null), // operator | agent | sequence; own echo with no outbox row = sent outside this system
       })),
       nextCursor: rows.length > limit && last ? Buffer.from(JSON.stringify([iso(last.sent_at), last.id])).toString('base64url') : null,
     };

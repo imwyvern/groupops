@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { groupsApi, sequencesApi } from '../api/endpoints';
 import type { PrecheckStep, StepVars, Vars } from '../api/types';
@@ -24,6 +24,33 @@ export function SequenceStartPage() {
   const [busy, setBusy] = useState(false);
 
   const selected = sequences.data?.find((s) => s.id === sequenceId);
+  // A just-created sequence is selected (and its variables scaffolded) once the list has reloaded.
+  const pendingSelect = useRef<string | null>(null);
+  useEffect(() => {
+    if (pendingSelect.current && sequences.data?.some((s) => s.id === pendingSelect.current)) {
+      selectSequence(pendingSelect.current);
+      pendingSelect.current = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sequences.data]);
+
+  /**
+   * Picking a sequence pre-fills one var row per {placeholder} its steps use, keeping values
+   * already typed. This is form scaffolding only — resolution (and stepVars precedence) is
+   * done by the server's precheck, so the preview is exactly what will be sent.
+   */
+  const selectSequence = (id: string) => {
+    setSequenceId(id);
+    setPrecheck(null);
+    const seq = sequences.data?.find((s) => s.id === id);
+    if (!seq) return;
+    const keys = [...new Set(seq.steps.flatMap((st) => [...st.text.matchAll(/\{([A-Za-z0-9_]+)\}/g)].map((m) => m[1])))];
+    setRows((prev) => {
+      const typed = new Map(prev.filter((r) => r.key).map((r) => [r.key, r.value]));
+      const next = keys.map((key) => ({ key, value: typed.get(key) ?? '' }));
+      return next.length ? next : [{ key: '', value: '' }];
+    });
+  };
 
   /** Validate local inputs; returns null (and shows why) if invalid. */
   const collectInputs = (): { vars: Vars; stepVars: StepVars } | null => {
@@ -69,14 +96,14 @@ export function SequenceStartPage() {
 
   return (
     <section>
-      <p><Link to={`/groups/${groupId}`}>← 群 {groupId}</Link></p>
+      <p><Link to={`/groups/${groupId}`}>← 返回群详情</Link></p>
       <h2>启动话术序列</h2>
       <ErrorText error={sequences.error} />
 
       <div className="card">
         <label>
           序列
-          <select value={sequenceId} onChange={(e) => { setSequenceId(e.target.value); setPrecheck(null); }}>
+          <select value={sequenceId} onChange={(e) => selectSequence(e.target.value)}>
             <option value="">— 选择 —</option>
             {sequences.data?.map((s) => (
               <option key={s.id} value={s.id}>{s.name} ({s.steps.length} 步)</option>
@@ -95,7 +122,9 @@ export function SequenceStartPage() {
           </table>
         )}
 
+        {sequences.data?.length === 0 && <p className="banner banner-info">还没有序列。先在下方「新建序列」粘贴一份 JSON。</p>}
         <h4>vars（默认变量）</h4>
+        {selected && <p className="muted small">已按序列里用到的占位符列出变量；留空的变量会在预检时指出是哪一步缺失。</p>}
         {rows.map((row, i) => (
           <div key={i} className="var-row">
             <input placeholder="key" value={row.key} onChange={(e) => updateRow(i, { key: e.target.value })} />
@@ -130,7 +159,7 @@ export function SequenceStartPage() {
         </Modal>
       )}
 
-      <CreateSequenceForm onCreated={(id) => { sequences.reload(); setSequenceId(id); }} />
+      <CreateSequenceForm noSequences={sequences.data?.length === 0} onCreated={(id) => { pendingSelect.current = id; sequences.reload(); }} />
     </section>
   );
 }
@@ -165,7 +194,7 @@ const SEQUENCE_EXAMPLE = `{
   ]
 }`;
 
-function CreateSequenceForm({ onCreated }: { onCreated: (id: string) => void }) {
+function CreateSequenceForm({ onCreated, noSequences }: { onCreated: (id: string) => void; noSequences: boolean }) {
   const [text, setText] = useState('');
   const [error, setError] = useState<unknown>(null);
   const [created, setCreated] = useState<string | null>(null);
@@ -185,11 +214,12 @@ function CreateSequenceForm({ onCreated }: { onCreated: (id: string) => void }) 
   };
 
   return (
-    <details className="card">
+    <details className="card" open={noSequences}>
       <summary>新建序列（粘贴 JSON）</summary>
       <textarea rows={10} value={text} onChange={(e) => setText(e.target.value)} placeholder={SEQUENCE_EXAMPLE} />
       <div className="actions">
         <button onClick={submit} disabled={!text.trim()}>创建序列</button>
+        <button type="button" className="btn-link" onClick={() => setText(SEQUENCE_EXAMPLE)}>填入示例</button>
       </div>
       {created && <p className="ok">已创建序列 {created}</p>}
       <ErrorText error={error} />

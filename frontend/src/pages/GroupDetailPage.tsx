@@ -125,14 +125,21 @@ function GroupHeader({ group, onChanged }: { group: Group; onChanged: () => void
   const [saving, setSaving] = useState(false);
   const leaveJob = useJob(onChanged);
 
+  // Optimistic: the checkbox flips immediately; on failure the refetch in `finally` restores truth.
+  const [optimistic, setOptimistic] = useState<{ agentEnabled?: boolean; autoKickEnabled?: boolean }>({});
+  const agentEnabled = optimistic.agentEnabled ?? group.agentEnabled;
+  const autoKickEnabled = optimistic.autoKickEnabled ?? group.autoKickEnabled;
+
   const patch = async (change: { agentEnabled?: boolean; autoKickEnabled?: boolean }) => {
     setSaving(true);
     setError(null);
+    setOptimistic((o) => ({ ...o, ...change }));
     try {
       await groupsApi.patch(group.id, change);
     } catch (err) {
       setError(err);
     } finally {
+      setOptimistic({});
       setSaving(false);
       onChanged();
     }
@@ -152,8 +159,12 @@ function GroupHeader({ group, onChanged }: { group: Group; onChanged: () => void
   return (
     <div className="card group-header">
       <h2>
-        群 {group.id} <StatusBadge status={group.status} />
+        群 {group.gatewayGroupId ?? '（创建中）'} <StatusBadge status={group.status} /> <span className="muted small">{group.id}</span>
       </h2>
+      {group.status === 'unreachable' && (
+        <p className="banner banner-danger">网关报告此群不可写（被解散或禁言）：新消息不会再发出，序列已停止，Agent 不再触发。</p>
+      )}
+      {group.status === 'left' && <p className="banner banner-info">所有服务账号已退出此群，仅保留历史记录。</p>}
       <div className="kv">
         <span>网关群 ID</span><span>{group.gatewayGroupId ?? '—'}</span>
         <span>群主账号</span><span><code>{group.creatorAccountId}</code></span>
@@ -167,20 +178,20 @@ function GroupHeader({ group, onChanged }: { group: Group; onChanged: () => void
           <label className="inline">
             <input
               type="checkbox"
-              checked={group.agentEnabled}
+              checked={agentEnabled}
               disabled={saving}
               onChange={(e) => patch({ agentEnabled: e.target.checked })}
             />
-            Agent 自动回复
+            <span title="开启后，群里非本平台账号发的每条消息都会触发一次 Agent 运行">Agent 自动回复</span>
           </label>
           <label className="inline">
             <input
               type="checkbox"
-              checked={group.autoKickEnabled}
+              checked={autoKickEnabled}
               disabled={saving}
               onChange={(e) => patch({ autoKickEnabled: e.target.checked })}
             />
-            自动踢人
+            <span title="允许 Agent 调用 kick_user 移除成员（仍需审计通过）">自动踢人</span>
           </label>
           <button className="danger" onClick={leaveAll} disabled={group.status === 'left' || leaveJob.job?.status === 'running'}>
             全部退群

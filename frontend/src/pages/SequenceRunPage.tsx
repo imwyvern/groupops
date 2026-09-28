@@ -38,7 +38,7 @@ export function SequenceRunPage() {
 
   return (
     <section>
-      {r && <p><Link to={`/groups/${r.groupId}`}>← 群 {r.groupId}</Link></p>}
+      {r && <p><Link to={`/groups/${r.groupId}`}>← 返回群详情</Link></p>}
       <h2>序列运行 {runId}</h2>
       <ErrorText error={run.error} />
       {r && (
@@ -46,17 +46,17 @@ export function SequenceRunPage() {
           <div className="card kv">
             <span>序列</span><span>{definition?.name ?? r.sequenceId}</span>
             <span>状态</span><span><StatusBadge status={r.status} /></span>
-            <span>当前步骤</span><span>{r.currentStepIndex}</span>
+            <span>进度</span><span>{r.steps.filter((s) => s.status === 'sent' || s.status === 'skipped' || s.status === 'failed').length} / {r.steps.length} 步完成{running ? `，当前第 ${r.currentStepIndex} 步` : ''}</span>
           </div>
           <table>
             <thead>
-              <tr><th>#</th><th>文本模板</th><th>状态</th><th>计划时间</th><th>发送时间</th><th>变量（来源）</th></tr>
+              <tr><th>#</th><th>发送文本</th><th>状态</th><th>计划时间</th><th>发送时间</th><th>变量（来源）</th></tr>
             </thead>
             <tbody>
               {r.steps.map((s) => (
                 <tr key={s.index} className={s.index === r.currentStepIndex && running ? 'row-current' : undefined}>
                   <td>{s.index}</td>
-                  <td>{stepText(s.index) ?? '—'}</td>
+                  <td>{s.text ?? stepText(s.index) ?? '—'}{s.text && stepText(s.index) && <div className="muted small">{stepText(s.index)}</div>}</td>
                   <td><StatusBadge status={s.status} /></td>
                   <td>{formatTime(s.scheduledAt)}</td>
                   <td>{formatTime(s.sentAt)}</td>
