@@ -158,10 +158,10 @@ function PrecheckTable({ steps }: { steps: PrecheckStep[] }) {
 }
 
 const SEQUENCE_EXAMPLE = `{
-  "name": "欢迎话术",
+  "name": "活动提醒",
   "steps": [
-    { "index": 1, "accountRole": "creator", "text": "大家好，欢迎来到{{location}}", "delaySeconds": 0 },
-    { "index": 2, "accountRole": "member", "text": "{{location}}见！", "delaySeconds": 30 }
+    { "index": 1, "accountRole": "admin",  "text": "{event} 将于 {time} 开始，请提前准备", "delaySeconds": 10 },
+    { "index": 2, "accountRole": "member", "text": "提醒：{event} 的资料已上传到 {location}", "delaySeconds": 5 }
   ]
 }`;
 

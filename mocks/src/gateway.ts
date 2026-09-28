@@ -162,7 +162,7 @@ r.post('/groups/:gid/kick', async (req, res) => {
 r.post('/groups/:gid/leave', (req, res) => {
   const g = grp(res, req.params.gid); if (!g) return;
   const { accountId } = req.body;
-  if (guard(res, accountId, false)) return;
+  if (guard(res, accountId)) return;
   if (knobs.leaveFailFor.includes(accountId)) return send(res, 500, { code: 'INTERNAL', message: 'leave failed' });
   const puid = acct(accountId).platformUserId;
   g.members.delete(puid);

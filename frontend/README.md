@@ -57,6 +57,4 @@ Write controls are only rendered for `admin`, via `<AdminOnly>` or `isAdmin`. Th
 - The send box only appears when the group status is `active`, and leave-all is disabled when the status is `left`. These are UI choices; the server remains authoritative.
 - A 422 `UNRESOLVED_PLACEHOLDER` carries `stepIndex` and `key` at the top level of `error`. `ApiError.extra` keeps every field beyond code/message/requestId.
 - `stepVars` keys must be numeric step indices, and values must be string maps. This is checked on the client before sending.
-- The placeholder syntax in the example sequence (`{{location}}`) is only an illustration. The client never interprets templates.
-- Sequence-run steps have no text, so the progress page takes the template text from `GET /api/sequences`.
-- If the server restarts and resets `seq`, the client's larger `lastSeq` would drop the new frames. The resync refetch covers what is on screen, but a production version should detect a seq reset, for example via an epoch in the auth reply.
+- Placeholders use the spec's `{key}` syntax; the client never resolves them itself — previews come from `POST /api/sequences/:id/precheck`, so the preview is exactly what the server will send.

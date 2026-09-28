@@ -10,5 +10,9 @@
     "mock:agent": "pnpm --filter mocks agent",
     "test": "pnpm --filter backend test",
     "db:reset": "docker compose exec -T postgres psql -U groupops -d postgres -c 'DROP DATABASE IF EXISTS groupops WITH (FORCE)' -c 'CREATE DATABASE groupops' && pnpm migrate"
+  },
+  "packageManager": "pnpm@11.8.0",
+  "engines": {
+    "node": ">=22"
   }
 }
