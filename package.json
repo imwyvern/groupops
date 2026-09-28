@@ -1,0 +1,13 @@
+{
+  "name": "groupops",
+  "private": true,
+  "scripts": {
+    "db:up": "docker compose up -d --wait postgres",
+    "migrate": "pnpm --filter backend migrate",
+    "dev:backend": "pnpm --filter backend dev",
+    "dev:frontend": "pnpm --filter frontend dev",
+    "mock:gateway": "pnpm --filter mocks gateway",
+    "mock:agent": "pnpm --filter mocks agent",
+    "test": "pnpm --filter backend test"
+  }
+}

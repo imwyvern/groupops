@@ -1,0 +1,15 @@
+{
+  "name": "mocks",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "gateway": "tsx src/gateway.ts",
+    "agent": "tsx src/agent.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
