@@ -22,6 +22,7 @@ const defaults = () => ({
   joinDelayMs: [100, 600] as [number, number],
   acceptDelayMs: 0,              // how long `send` takes before answering 202
   sendScript: [] as string[],    // 'ok' | '504-land' | '504-lost' | '429:N' | '503' | 'fail-forbidden' | 'forbidden' | 'not-in-group'
+  sendScriptFor: {} as Record<string, string[]>, // same, scoped to one gateway groupId (takes precedence)
   inviteReadyMs: 0,
   expireNextInvite: false,
   dropJoinFor: [] as string[],   // accountIds whose member_joined never arrives
@@ -38,7 +39,7 @@ const events: Evt[] = [];
 const clients = new Set<http.ServerResponse>();
 let nextEventId = 1, nextGroup = 1, nextMsg = 1;
 /** Observability for tests: sends received while an account was rate limited (must stay 0). */
-const stats = { sendCalls: 0, sendsWhileLimited: 0, promoteCalls: 0 };
+const stats = { sendCalls: 0, sendsWhileLimited: 0, promoteCalls: 0, sendsByClientId: {} as Record<string, number>, accepted: [] as { groupId: string; clientMsgId: string; text: string }[] };
 
 const puidOf = (accountId: string) => `pu_${accountId}`;
 const accountByPuid = (puid: string) => [...accounts.entries()].find(([, a]) => a.platformUserId === puid)?.[0];
@@ -179,6 +180,7 @@ r.post('/groups/:gid/send', async (req, res) => {
   const g = grp(res, req.params.gid); if (!g) return;
   const { accountId, clientMsgId, text } = req.body;
   stats.sendCalls++;
+  stats.sendsByClientId[clientMsgId] = (stats.sendsByClientId[clientMsgId] ?? 0) + 1;
   if (guard(res, accountId)) return;
   const a = acct(accountId);
   if (Date.now() < a.rateLimitedUntil) {
@@ -186,7 +188,7 @@ r.post('/groups/:gid/send', async (req, res) => {
     a.rateLimitedUntil = Date.now() + a.retryAfter * 1000; // any send during the window resets it
     return send(res, 429, { code: 'RATE_LIMITED', message: 'rate limited', retryAfterSeconds: a.retryAfter });
   }
-  const mode = knobs.sendScript.shift() ?? 'ok';
+  const mode = knobs.sendScriptFor[req.params.gid]?.shift() ?? knobs.sendScript.shift() ?? 'ok';
   if (mode.startsWith('429:')) {
     a.retryAfter = Number(mode.slice(4));
     a.rateLimitedUntil = Date.now() + a.retryAfter * 1000;
@@ -203,6 +205,7 @@ r.post('/groups/:gid/send', async (req, res) => {
   }
   if (mode === '504-lost') return send(res, 504, { code: 'NETWORK_TIMEOUT', message: 'timeout' });
   if (knobs.acceptDelayMs) await sleep(knobs.acceptDelayMs);
+  stats.accepted.push({ groupId: req.params.gid, clientMsgId, text });
   send(res, 202, { accepted: true });
   setTimeout(() => {
     if (mode === 'fail-forbidden') { g.writable = false; emit('message_failed', { clientMsgId, code: 'GROUP_WRITE_FORBIDDEN' }); return; }
@@ -228,7 +231,7 @@ function write1(res: http.ServerResponse, e: Evt) { res.write(`id: ${e.eventId}\
 
 // ---------- test / demo controls ----------
 r.post('/__control', (req, res) => { knobs = { ...knobs, ...req.body }; send(res, 200, knobs); });
-r.post('/__reset', (_req, res) => { knobs = defaults(); Object.assign(stats, { sendCalls: 0, sendsWhileLimited: 0, promoteCalls: 0 }); send(res, 200, {}); });
+r.post('/__reset', (_req, res) => { knobs = defaults(); Object.assign(stats, { sendCalls: 0, sendsWhileLimited: 0, promoteCalls: 0, sendsByClientId: {}, accepted: [] }); send(res, 200, {}); });
 r.get('/__state', (_req, res) => send(res, 200, {
   stats, lastEventId: nextEventId - 1,
   accounts: Object.fromEntries(accounts),

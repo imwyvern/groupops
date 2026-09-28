@@ -63,8 +63,8 @@ export async function startSequenceRun(c: pg.PoolClient, groupId: string, sequen
   for (const s of resolved) {
     await c.query(
       `INSERT INTO sequence_run_steps (run_id, idx, account_role, text, delay_seconds, scheduled_at, resolved_vars, var_sources)
-       VALUES ($1, $2, $3, $4, $5, CASE WHEN $2 = $8 THEN now() + make_interval(secs => $5) END, $6, $7)`,
-      [runId, s.index, s.accountRole, s.resolvedText, s.delaySeconds, JSON.stringify(s.resolvedVars), JSON.stringify(s.varSources), first.index]);
+       VALUES ($1, $2, $3, $4, $5, CASE WHEN $8 THEN now() + make_interval(secs => $5::int) END, $6, $7)`,
+      [runId, s.index, s.accountRole, s.resolvedText, s.delaySeconds, JSON.stringify(s.resolvedVars), JSON.stringify(s.varSources), s === first]);
   }
   queueEvent(c, 'sequence_run', { runId, groupId, status: 'running', currentStepIndex: first.index });
   return runId;

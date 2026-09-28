@@ -61,7 +61,8 @@ export async function startOutbox() {
 async function dispatch() {
   const { rows } = await pool.query(`
     SELECT DISTINCT ON (m.account_id) m.id, m.account_id, m.group_id, m.client_msg_id, m.text, m.delivery_status,
-           m.attempt_started_at, m.next_attempt_at, a.status AS account_status, g.gateway_group_id, g.status AS group_status
+           m.attempt_started_at, (m.next_attempt_at IS NULL OR m.next_attempt_at <= now()) AS due,
+           a.status AS account_status, g.gateway_group_id, g.status AS group_status
       FROM messages m
       JOIN accounts a ON a.id = m.account_id
       JOIN groups g ON g.id = m.group_id
@@ -69,7 +70,7 @@ async function dispatch() {
      ORDER BY m.account_id, m.id`);
   await Promise.all(rows
     .filter((r) => r.delivery_status === 'queued' && !r.attempt_started_at && r.account_status === 'online'
-      && (!r.next_attempt_at || r.next_attempt_at <= new Date()))
+      && r.due)
     .map(sendOne));
 }
 
@@ -146,7 +147,8 @@ async function fail(c: pg.PoolClient, m: { id: number; group_id: string; client_
  */
 async function resolveUnknown() {
   const { rows } = await pool.query(`
-    SELECT m.id, m.group_id, m.client_msg_id, m.unknown_since, m.resend_count, g.gateway_group_id
+    SELECT m.id, m.group_id, m.client_msg_id, m.resend_count, g.gateway_group_id,
+           extract(epoch from (now() - m.unknown_since)) * 1000 AS unknown_age_ms
       FROM messages m JOIN groups g ON g.id = m.group_id
      WHERE m.delivery_status = 'unknown'`);
   await Promise.all(rows.map(async (m) => {
@@ -159,7 +161,7 @@ async function resolveUnknown() {
       const cur = await c.query(`SELECT delivery_status FROM messages WHERE id = $1 FOR UPDATE`, [m.id]);
       if (cur.rows[0]?.delivery_status !== 'unknown') return; // resolved concurrently (e.g. message_sent arrived)
       if (landed) return markSent(c, m.client_msg_id, landed.msgId, landed.sentAt);
-      if (Date.now() - new Date(m.unknown_since).getTime() < UNKNOWN_SETTLE_MS) return;
+      if (Number(m.unknown_age_ms) < UNKNOWN_SETTLE_MS) return;
       if (m.resend_count < 1) {
         await c.query(
           `UPDATE messages SET delivery_status = 'queued', attempt_started_at = NULL, unknown_since = NULL, resend_count = resend_count + 1

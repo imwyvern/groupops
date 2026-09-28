@@ -56,10 +56,15 @@ async function claim() {
 
 // ------------------------------------------------------------------ main loop
 
-interface Run { id: string; group_id: string; status: string; history: any[]; step_count: number; protocol_error_streak: number; elapsed_ms: number; active_since: Date }
+interface Run { id: string; group_id: string; status: string; history: any[]; step_count: number; protocol_error_streak: number; elapsed_now_ms: number; loaded_at: number }
 
-const loadRun = async (id: string): Promise<Run> => (await pool.query('SELECT * FROM agent_runs WHERE id = $1', [id])).rows[0];
-const elapsed = (r: Run) => Number(r.elapsed_ms) + (Date.now() - new Date(r.active_since).getTime());
+/** `elapsed_now_ms` is computed by the database clock (the same clock that stamps active_since). */
+const loadRun = async (id: string): Promise<Run> => {
+  const r = (await pool.query(
+    `SELECT *, elapsed_ms + extract(epoch from (now() - active_since)) * 1000 AS elapsed_now_ms FROM agent_runs WHERE id = $1`, [id])).rows[0];
+  return { ...r, elapsed_now_ms: Number(r.elapsed_now_ms), loaded_at: Date.now() };
+};
+const elapsed = (r: Run) => r.elapsed_now_ms + (Date.now() - r.loaded_at);
 
 async function drive(runId: string) {
   for (;;) {

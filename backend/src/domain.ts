@@ -29,7 +29,7 @@ export type TransitionResult = { ok: true; from: AccountStatus } | { ok: false; 
  */
 export async function transitionAccount(
   c: pg.PoolClient, accountId: string, expectedFrom: AccountStatus, to: AccountStatus,
-  set: { platformUserId?: string; rateLimitedUntil?: Date | null } = {},
+  set: { platformUserId?: string; rateLimitedForSec?: number } = {},
 ): Promise<TransitionResult> {
   if (!isLegal(expectedFrom, to)) {
     const exists = await c.query('SELECT 1 FROM accounts WHERE id = $1', [accountId]);
@@ -38,9 +38,9 @@ export async function transitionAccount(
   const { rows } = await c.query(
     `UPDATE accounts SET status = $3, version = version + 1, updated_at = now(),
             platform_user_id = coalesce($4, platform_user_id),
-            rate_limited_until = CASE WHEN $3 = 'rate_limited' THEN $5::timestamptz ELSE NULL END
+            rate_limited_until = CASE WHEN $3 = 'rate_limited' THEN now() + make_interval(secs => $5::float8) ELSE NULL END
       WHERE id = $1 AND status = $2 RETURNING id`,
-    [accountId, expectedFrom, to, set.platformUserId ?? null, set.rateLimitedUntil ?? null]);
+    [accountId, expectedFrom, to, set.platformUserId ?? null, set.rateLimitedForSec ?? null]);
   if (!rows[0]) {
     const cur = await c.query('SELECT status FROM accounts WHERE id = $1', [accountId]);
     return cur.rowCount ? { ok: false, code: 'CAS_CONFLICT', current: cur.rows[0].status } : { ok: false, code: 'ACCOUNT_NOT_FOUND' };
@@ -78,13 +78,19 @@ async function applyTerminalConsequences(c: pg.PoolClient, accountId: string, st
   queueEvent(c, 'account_terminal', { accountId, status });
 }
 
-/** RATE_LIMITED from the gateway. Refreshing `rateLimitedUntil` while already limited is not a transition. */
+/**
+ * RATE_LIMITED from the gateway. Refreshing `rateLimitedUntil` while already limited is not a transition.
+ * Deadlines use the database clock only (never JS time compared to now()), plus a small margin so
+ * that clock skew between us and the gateway can't make us send a moment too early — which would
+ * restart the gateway's window.
+ */
+const RATE_LIMIT_MARGIN_SEC = 0.5;
 export async function rateLimit(c: pg.PoolClient, accountId: string, retryAfterSeconds: number) {
-  const until = new Date(Date.now() + Math.max(1, retryAfterSeconds) * 1000);
+  const secs = Math.max(1, retryAfterSeconds) + RATE_LIMIT_MARGIN_SEC;
   const { rows } = await c.query('SELECT status FROM accounts WHERE id = $1 FOR UPDATE', [accountId]);
   const cur = rows[0]?.status as AccountStatus | undefined;
-  if (cur === 'online') await transitionAccount(c, accountId, 'online', 'rate_limited', { rateLimitedUntil: until });
-  else if (cur === 'rate_limited') await c.query('UPDATE accounts SET rate_limited_until = $2 WHERE id = $1', [accountId, until]);
+  if (cur === 'online') await transitionAccount(c, accountId, 'online', 'rate_limited', { rateLimitedForSec: secs });
+  else if (cur === 'rate_limited') await c.query('UPDATE accounts SET rate_limited_until = now() + make_interval(secs => $2::float8) WHERE id = $1', [accountId, secs]);
 }
 
 /** Expired rate limits go back to online — only if the account is still rate_limited (A1 last rule). */
