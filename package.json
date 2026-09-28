@@ -8,6 +8,7 @@
     "dev:frontend": "pnpm --filter frontend dev",
     "mock:gateway": "pnpm --filter mocks gateway",
     "mock:agent": "pnpm --filter mocks agent",
-    "test": "pnpm --filter backend test"
+    "test": "pnpm --filter backend test",
+    "db:reset": "docker compose exec -T postgres psql -U groupops -d postgres -c 'DROP DATABASE IF EXISTS groupops WITH (FORCE)' -c 'CREATE DATABASE groupops' && pnpm migrate"
   }
 }
