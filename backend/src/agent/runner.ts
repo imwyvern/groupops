@@ -146,7 +146,14 @@ function checkShape(b: any): string | null {
 // ------------------------------------------------------------------ step recording
 
 interface Result { content: string; isError: boolean; code: string | null; summary: string }
-const trunc = (s: string, n: number) => (s.length > n ? s.slice(0, n) : s);
+const bytes = (s: string) => Buffer.byteLength(s, 'utf8');
+/** Truncate to at most n UTF-8 bytes without splitting a character (spec limits are in KB, and text is often CJK). */
+const truncBytes = (s: string, n: number) => {
+  if (bytes(s) <= n) return s;
+  const cut = Buffer.from(s, 'utf8').subarray(0, n).toString('utf8');
+  return cut.endsWith('\uFFFD') ? cut.slice(0, -1) : cut;
+};
+const trunc = (s: string, n: number) => (s.length > n ? s.slice(0, n) : s); // character count (resultSummary ≤ 200 字)
 const summarize = (s: string) => trunc(s, 200);
 
 function errorResult(code: string, message: string, hint?: string): Result {
@@ -155,7 +162,7 @@ function errorResult(code: string, message: string, hint?: string): Result {
 }
 function okResult(obj: unknown): Result {
   let content = JSON.stringify(obj);
-  if (content.length > RESULT_MAX) content = JSON.stringify({ truncated: true, preview: content.slice(0, RESULT_MAX - 100) });
+  if (bytes(content) > RESULT_MAX) content = JSON.stringify({ truncated: true, preview: truncBytes(content, RESULT_MAX - 200) });
   return { content, isError: false, code: null, summary: summarize(content) };
 }
 
@@ -175,7 +182,7 @@ async function saveStep(c: pg.PoolClient, run: Run, idx: number, s: {
        audit_verdict = coalesce(EXCLUDED.audit_verdict, agent_steps.audit_verdict), effect = coalesce(EXCLUDED.effect, agent_steps.effect)`,
     [run.id, idx, s.kind, s.phase ?? 'done', s.block?.id ?? null, s.block?.name ?? null, s.block ? JSON.stringify(s.block.input) : null,
      s.result?.summary ?? null, s.result?.content ?? null, s.result?.isError ?? false, s.result?.code ?? null, s.audit ?? null,
-     s.effect ? JSON.stringify(s.effect) : null, s.raw != null ? trunc(s.raw, RAW_MAX) : null]);
+     s.effect ? JSON.stringify(s.effect) : null, s.raw != null ? truncBytes(s.raw, RAW_MAX) : null]);
   queueEvent(c, 'agent_step', { runId: run.id, groupId: run.group_id, idx });
 }
 
@@ -265,7 +272,7 @@ async function getRecentMessages(run: Run, limit: number): Promise<Result> {
     return { msgId: r.msg_id, senderPlatformUserId: r.sender_platform_user_id, isOwn: r.is_own, text: long ? r.text.slice(0, 500) : r.text, sentAt: new Date(r.sent_at).toISOString() };
   });
   // A5.9: keep the tool_result under 8KB by dropping the oldest messages.
-  while (messages.length && JSON.stringify({ messages, truncated }).length > RESULT_MAX) { messages = messages.slice(1); truncated = true; }
+  while (messages.length && bytes(JSON.stringify({ messages, truncated, note: '' })) > RESULT_MAX - 200) { messages = messages.slice(1); truncated = true; }
   // A5.11: an identical consecutive call gets the same data plus a nudge to wrap up.
   const prev = [...run.history].reverse().find((m) => m.role === 'assistant')?.content?.[0];
   const repeated = prev?.name === 'get_recent_messages' && prev?.input?.limit === limit;
@@ -283,9 +290,13 @@ async function executeStep(run: Run, step: any) {
  * clear verdict (in which case the run is already `blocked`).
  */
 async function audit(run: Run, step: any, text: string): Promise<'pass' | 'fail' | null> {
+  // A verdict obtained before a crash is reused: re-auditing could flip it, and running out of
+  // attempts on resume would wrongly block a call that was already approved.
+  if (step.audit_verdict === 'pass' || step.audit_verdict === 'fail') return step.audit_verdict;
+  let outOfTime = false;
   for (let attempt = step.audit_attempts; attempt < 3; attempt++) {
     await pool.query('UPDATE agent_steps SET audit_attempts = $3 WHERE run_id = $1 AND idx = $2', [run.id, step.idx, attempt + 1]);
-    if (elapsed(await loadRun(run.id)) >= cfg.wallClockMs) break;
+    if (elapsed(await loadRun(run.id)) >= cfg.wallClockMs) { outOfTime = true; break; }
     try {
       const res = await fetch(`${config.agentUrl}/agent/audit`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
@@ -293,15 +304,22 @@ async function audit(run: Run, step: any, text: string): Promise<'pass' | 'fail'
       });
       if (!res.ok) continue;
       const verdict = JSON.parse(await res.text())?.verdict;
-      if (verdict === 'pass' || verdict === 'fail') return verdict;
+      if (verdict === 'pass' || verdict === 'fail') {
+        await pool.query('UPDATE agent_steps SET audit_verdict = $3 WHERE run_id = $1 AND idx = $2', [run.id, step.idx, verdict]);
+        return verdict;
+      }
     } catch { /* timeout / bad JSON: not a verdict, try again */ }
   }
+  const reason = outOfTime ? 'run hit the 60s wall clock while waiting for the audit; tool not executed'
+                           : 'audit gave no verdict after 3 attempts; tool not executed';
   await tx(async (c) => {
-    await c.query(`UPDATE agent_steps SET phase = 'done', is_error = true, error_code = 'AUDIT_BLOCKED', audit_verdict = 'unavailable',
-                          result_summary = 'audit gave no verdict after 3 attempts; tool not executed' WHERE run_id = $1 AND idx = $2`, [run.id, step.idx]);
+    await c.query(`UPDATE agent_steps SET phase = 'done', is_error = true, error_code = $3, audit_verdict = 'unavailable', result_summary = $4
+                    WHERE run_id = $1 AND idx = $2`, [run.id, step.idx, outOfTime ? 'WALL_CLOCK' : 'AUDIT_BLOCKED', reason]);
     queueEvent(c, 'agent_step', { runId: run.id, groupId: run.group_id, idx: step.idx });
   });
-  await endRun(await loadRun(run.id), 'blocked', 'audit_blocked');
+  // A5.2: the 60s budget includes audit time and ends the run as wall_clock; only "no verdict" blocks it.
+  if (outOfTime) await endRun(await loadRun(run.id), 'failed', 'wall_clock');
+  else await endRun(await loadRun(run.id), 'blocked', 'audit_blocked');
   return null;
 }
 
@@ -316,6 +334,9 @@ async function pickAccount(groupId: string, roles: string[]) {
 async function executeSend(run: Run, step: any) {
   const { text, idempotency_key: key } = step.input;
   let effect = step.effect as { clientMsgId: string; startedAt: number } | null;
+  // Resuming after a restart: the send already happened (or is in the outbox). Give it a fresh 5s
+  // from now — downtime must not turn an effect that did happen into SEND_TIMEOUT (A5.8).
+  const resumed = !!effect;
 
   if (!effect) {
     // A5.7: a key already used in this run → report that message, no audit, no send.
@@ -342,7 +363,7 @@ async function executeSend(run: Run, step: any) {
   }
 
   // Wait (≤5s from when the send was recorded) for the outbox to reach a verdict.
-  const deadline = effect.startedAt + 5_000;
+  const deadline = (resumed ? Date.now() : effect.startedAt) + 5_000;
   for (;;) {
     const m = (await pool.query('SELECT delivery_status, fail_code FROM messages WHERE client_msg_id = $1', [effect.clientMsgId])).rows[0];
     const s = m?.delivery_status;

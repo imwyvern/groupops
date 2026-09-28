@@ -45,10 +45,10 @@ pnpm dev:frontend     # :5173  → 打开 http://localhost:5173
 ## 测试
 
 ```bash
-pnpm test             # 后端场景测试：起真实进程 + 独立测试库，19 个用例
+pnpm test             # 后端场景测试：起真实进程 + 独立测试库，21 个用例
 ```
 
-覆盖 §2.4 的 **S1–S8 全部**，外加：A1 并发 CAS / 转移表 / 终态级联，A2 504 丢失 → 重发一次 → `NETWORK_TIMEOUT`、504 已落地 → 不重发，A5 坏响应连续 3 次、12 步预算、审计 3 次无结论 → `blocked`、run 期间消息合并进下一次 run，**A5.8 在 agent run 执行中 `SIGKILL` 后端再拉起，同一个 runId 续跑并且消息只发了一次**，B2 leave-all 部分失败，B3 refresh 轮换与重放作废整个会话。
+覆盖 §2.4 的 **S1–S8 全部**，外加：A1 并发 CAS / 转移表 / 终态级联，A2 504 丢失 → 重发一次 → `NETWORK_TIMEOUT`、504 已落地 → 不重发，A5 坏响应连续 3 次、12 步预算、审计 3 次无结论 → `blocked`、run 期间消息合并进下一次 run，**A5.8 在 agent run 执行中 `SIGKILL` 后端再拉起，同一个 runId 续跑并且消息只发了一次；停机超过 5 秒也不会把已发出的消息误记为 `SEND_TIMEOUT`**，账号在消息结果未知时进入终态 → 消息 `cancelled`、序列继续推进，B2 leave-all 部分失败，B3 refresh 轮换与重放作废整个会话。
 
 ```bash
 cd frontend && pnpm e2e   # C3：Playwright，登录 → 打开群 → 看到 agent run 步骤；viewer 看不到写按钮
@@ -63,16 +63,16 @@ cd frontend && pnpm e2e   # C3：Playwright，登录 → 打开群 → 看到 ag
 |---|---|---|
 | A0 schema 落后拒绝启动 | 启动时比较 `schema_migrations` 与代码里的最大版本，落后直接退出；迁移带 advisory lock、逐个事务、可重复执行 | `migrate.ts` `main.ts` |
 | A1 并发变更至多一个成功 | `UPDATE … WHERE status = expectedFrom` 本身就是 CAS，0 行即 `CAS_CONFLICT` | `domain.ts` |
-| A1 终态"要么都生效要么都不生效" | 状态 + 退出所有群 + 取消排队消息 + 序列步骤 skipped + WS 事件在一个事务里；三种来源（发送错误 / 网关事件 / 操作员）走同一个函数 | `domain.ts` |
+| A1 终态"要么都生效要么都不生效" | 状态 + 退出所有群 + 取消排队消息 + 序列步骤 skipped + WS 事件在一个事务里；三种来源（发送错误 / 网关事件 / 操作员）走同一个函数。进入终态时恰好在途的消息，事后若回到队列也会被同样取消，不会永远卡在 queued | `domain.ts` `outbox.ts` |
 | A1 推给前端的状态必须已保存 | WS 事件写入 `ws_events` 表，和状态同事务；提交前最后拿一把 advisory lock，使 `seq` 顺序 = 提交顺序，读取方按 seq 追就不会漏掉晚提交的事务 | `db.ts` `ws.ts` |
 | A2 不会"网关发了库里没有" | outbox：先 INSERT `queued`，再调网关 | `outbox.ts` |
 | A2 不会"一条记录对应网关多条消息" | 调网关前原子地打 `attempt_started_at`（抢占）。崩溃后"已抢占但无结果"的行按 504 处理：先 by-client-id 查证，确认没发出才重发，且总共只重发一次 | `outbox.ts` |
 | A2 504 → 5 秒内定论 | `unknown` 每 200ms 查 by-client-id；200 → sent；404 且距 504 ≥ 2s → 重发一次 / 已重发过则 `failed NETWORK_TIMEOUT`；503 保持 unknown，恢复后 200ms 内再判 | `outbox.ts` |
-| A2 限流期间网关收不到 send、到期按原序发出 | 每个账号同一时刻只有一条在途，队头按 id 取；限流期间账号不是 online 就不派发 | `outbox.ts` |
+| A2 限流期间网关收不到 send、到期按原序发出 | 每个账号按 id 顺序逐条**提交**（上一条拿到 202 或确定结果后才提交下一条）；限流期间账号不是 online 就不派发 | `outbox.ts` |
 | A2 事件去重 | 每个事件和一条 `processed_events` 主键插入同事务；消息另有 `(group_id, msg_id)` 唯一索引，覆盖"换了新 eventId 的补投" | `stream.ts` |
 | A2 停机/断流期间的事件 | 相邻事件可乱序 ≤1s，所以不能从"见过的最大 eventId"续传；持久化的是"至少 1.5s 前见过的最大 eventId"，重连从它续拉，重叠部分靠去重吸收 | `stream.ts` |
 | A2 处理事件时写库失败 | 事件追加到本地 journal 文件（不丢），推 `inconsistency`，事件流继续；journal 每 2s 重放直到清空 | `stream.ts` |
-| A2 自己的消息一行 | 回流的 `message` 可能早于 `message_sent`：因为每账号只有一条在途，可以立刻把 msgId 挂到那条 outbox 行上 | `stream.ts` `outbox.ts` |
+| A2 自己的消息一行 | 回流的 `message` 可能早于 `message_sent`：按账号 + 文本匹配到唯一的在途 outbox 行就立刻挂上 msgId；仍有歧义时先单独存一行，`message_sent` 到达时合并 | `stream.ts` `outbox.ts` |
 | A4 翻页不重不漏 | `(sent_at, id)` keyset 游标 | `app.ts` |
 | A5 同群至多一个 running（多实例也成立） | 部分唯一索引 `agent_runs(group_id) WHERE status='running'`；触发与 run 结束都在同一把按群的 advisory lock 下，结束时把待处理消息一次性放进下一个 run | `agent/trigger.ts` |
 | A5.8 重启续跑、副作用不重复也不误记失败 | 有副作用的工具（send / kick）分三段落库：步骤 `executing` → 副作用意图（outbox 行 / `effect.phase=calling`）→ 结果。恢复时**观察**已记录的副作用（消息状态、网关成员列表），而不是再做一次 | `agent/runner.ts` |
@@ -86,6 +86,19 @@ cd frontend && pnpm e2e   # C3：Playwright，登录 → 打开群 → 看到 ag
 ### 测试里抓到的一个真问题：时钟
 
 场景测试 S4 一开始不稳定：限流期间网关仍然收到了 send。原因是**数据库时钟（colima 虚拟机）比宿主机快 5 秒**，而限流截止时间用 JS 时间写、却拿数据库 `now()` 判断到期，于是提前 5 秒"到期"，再发一次又把网关的计时重置了。生产上多实例之间同样会有时钟偏差，所以改成：**所有持久化的截止时间只用数据库时钟**（限流到期、unknown 的 2 秒判定窗口、agent 的 60 秒墙钟），并给限流等待加 0.5s 余量，防止和网关之间的时钟差让我们早发。
+
+后来又发现这台机器上数据库虚拟机的时钟每隔几秒会在 0 与 +1.3s 之间来回跳（NTP 校时在生产上也会这样），墙钟再怎么统一也可能突然"快进"。于是对两个短时窗口——限流等待、504 后的 2 秒确认期——再加一道**本进程单调时钟**（`performance.now()`）的保护：两者都到期才放行。数据库里的截止时间只负责重启后的恢复。后者尤其重要：确认期被缩短就可能在网关收敛前重发，产生重复消息。
+
+### 自查：对照题目逐条核对后修掉的问题
+
+提交后又做了一轮"逐条对照规格读代码"的核查，修掉了测试没覆盖到的几处（每条都补了回归测试或在代码里注释了原因）：
+
+- 账号进入终态时恰好有一条消息结果未知（504 后查证中），查证后回到队列却再也不会被派发 → 永远卡在 `queued`，连带该群序列一直 `running`、之后启动都 409。现在这类消息同样按 `ACCOUNT_TERMINAL` 取消，序列步骤 `skipped` 继续推进。
+- 重启耗时超过 5 秒时，续跑的 `send_message` 用的是"发送时刻 + 5s"的旧截止时间，已经发出的消息被记成 `SEND_TIMEOUT`（违反 A5.8）。改为恢复时重新计时。
+- 8KB / 2KB 上限按字符数而不是字节算，中文内容会超出约 3 倍。改为 UTF-8 字节，并且不截断半个字符。
+- 事件的"安全游标"在事务提交前就记为已见，处理慢的事件在崩溃时可能被跳过。改为提交（或写入 journal）之后才计入。
+- 审计在第 3 次通过后、副作用落库前崩溃，恢复时会误判为 `blocked`；审计期间耗尽 60 秒会被记成 `audit_blocked`（应为 `wall_clock`）。审计结论现在单独落库、恢复时复用。
+- 其他：`{constructor}` 这类原型链上的名字会被当成已提供的变量；账号连接先调网关再做 CAS；viewer 发格式错误的请求得到 400 而不是 403；翻页游标只有毫秒精度而库里是微秒。
 
 ## 取舍与已知限制
 

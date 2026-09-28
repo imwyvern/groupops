@@ -49,7 +49,8 @@ export async function authenticate(req: FastifyRequest): Promise<AuthUser> {
 
 export function registerAuth(app: FastifyInstance) {
   // Every /api route except login/refresh/health requires a valid token; any write requires admin.
-  app.addHook('preHandler', async (req) => {
+  // onRequest runs before body parsing, so a viewer's malformed write is a 403, not a 400.
+  app.addHook('onRequest', async (req) => {
     const url = req.routeOptions.url ?? '';
     if (!url.startsWith('/api/') || url === '/api/health' || url === '/api/auth/login' || url === '/api/auth/refresh') return;
     const user = await authenticate(req);

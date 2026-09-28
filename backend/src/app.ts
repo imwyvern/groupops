@@ -37,13 +37,19 @@ export function buildApp() {
     const { to, expectedFrom } = (req.body ?? {}) as any;
     if (!ACCOUNT_STATUSES.includes(to) || !ACCOUNT_STATUSES.includes(expectedFrom)) throw badRequest('`to` and `expectedFrom` must be valid account statuses');
     if (to === 'online' && isLegal(expectedFrom, to)) return connectAccount(id, expectedFrom); // going online needs a gateway session
-    const r = await tx((c) => transitionAccount(c, id, expectedFrom, to));
+    // An operator-set rate_limited still needs an expiry, or it would never auto-recover (A1).
+    const r = await tx((c) => transitionAccount(c, id, expectedFrom, to, to === 'rate_limited' ? { rateLimitedForSec: 60 } : {}));
     if (!r.ok) throw r.code === 'ACCOUNT_NOT_FOUND' ? notFound(r.code) : conflict(r.code, undefined, r.current ? { currentStatus: r.current } : {});
     if (to === 'disconnected' || to === 'idle') await gateway.disconnect(id).catch(() => {}); // best effort; not subject to rate limits
     return { status: to };
   });
 
   async function connectAccount(id: string, expectedFrom: AccountStatus) {
+    // Check the expected state before any gateway side effect, so a stale expectedFrom answers
+    // CAS_CONFLICT (not a gateway error) and doesn't leave the gateway session open behind our back.
+    const cur = (await pool.query('SELECT status FROM accounts WHERE id = $1', [id])).rows[0];
+    if (!cur) throw notFound('ACCOUNT_NOT_FOUND');
+    if (cur.status !== expectedFrom) throw conflict('CAS_CONFLICT', undefined, { currentStatus: cur.status });
     let platformUserId: string;
     try { platformUserId = (await gateway.connect(id)).data.platformUserId; }
     catch (e) {
@@ -54,7 +60,11 @@ export function buildApp() {
       throw new ApiError(502, 'GATEWAY_ERROR', e instanceof Error ? e.message : String(e));
     }
     const r = await tx((c) => transitionAccount(c, id, expectedFrom, 'online', { platformUserId }));
-    if (!r.ok) throw r.code === 'ACCOUNT_NOT_FOUND' ? notFound(r.code) : conflict(r.code);
+    if (!r.ok) {
+      // Lost the race after connecting: if the winner left the account offline, close the session we opened.
+      if (r.current && r.current !== 'online' && r.current !== 'rate_limited') await gateway.disconnect(id).catch(() => {});
+      throw r.code === 'ACCOUNT_NOT_FOUND' ? notFound(r.code) : conflict(r.code, undefined, r.current ? { currentStatus: r.current } : {});
+    }
     return { status: 'online', platformUserId };
   }
 

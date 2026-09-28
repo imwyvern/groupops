@@ -71,6 +71,22 @@ test('A1: terminal state from a gateway event removes the account from groups an
   assert.equal((await a.post(`/api/accounts/${admin}/connect`)).status, 409);
 });
 
+test('A1: a send in flight when the account goes terminal ends cancelled, and its sequence moves on', async () => {
+  const { group, admin } = await makeGroup(token);
+  const seq = (await a.post('/api/sequences', { name: 'one', steps: [{ index: 1, accountRole: 'admin', text: 'in flight', delaySeconds: 0 }] })).body.id;
+  await gw.control({ sendScriptFor: { [group.gatewayGroupId]: ['504-lost', '504-lost'] } });
+  const { runId } = (await a.post(`/api/groups/${group.id}/sequence-runs`, { sequenceId: seq, vars: {}, stepVars: {} })).body;
+  const cid = await waitFor(async () => (await a.get(`/api/sequence-runs/${runId}`)).body.steps[0].clientMsgId, 5_000, 'step enqueued');
+  await waitFor(async () => (await byClient(group.id, cid))?.deliveryStatus === 'unknown', 5_000, 'unknown');
+  await gw.accountStatus(admin, 'suspended'); // terminal while the message is unresolved
+  const m = await waitFor(async () => { const x = await byClient(group.id, cid); return ['cancelled', 'failed'].includes(x?.deliveryStatus) && x; }, 10_000, 'settled');
+  assert.equal(m.deliveryStatus, 'cancelled');
+  assert.equal(m.failCode, 'ACCOUNT_TERMINAL');
+  const run = await waitFor(async () => { const r = (await a.get(`/api/sequence-runs/${runId}`)).body; return r.status !== 'running' && r; }, 5_000, 'sequence settles');
+  assert.equal(run.steps[0].status, 'skipped');
+  assert.equal((await a.get(`/api/groups/${group.id}`)).body.activeSequenceRunId, null, 'group is free for a new sequence');
+});
+
 // ------------------------------------------------------------------ S1–S4 (A2)
 
 test('S1: accepted until message_sent, then sent', async () => {
@@ -204,13 +220,14 @@ test('A5: messages arriving mid-run are batched into exactly one follow-up run',
   const { group } = await makeGroup(token, { agentEnabled: true });
   await agent.control({ mode: 'normal', turnDelayMs: 700 });
   await gw.inject(group.gatewayGroupId, 'first');
-  await waitFor(async () => (await runsOf(group.id)).length === 1, 5_000, 'first run');
+  const first = await waitFor(async () => (await runsOf(group.id))[0], 5_000, 'first run');
   await gw.inject(group.gatewayGroupId, 'second');
   await gw.inject(group.gatewayGroupId, 'third');
   const runs = await settledRun(group.id, 2);
   await sleep(500);
   assert.equal((await runsOf(group.id)).length, 2);
-  const next = await runDetail(runs[0].id);
+  assert.deepEqual((await runDetail(first.id)).triggerMessages.map((m: any) => m.text), ['first']);
+  const next = await runDetail(runs.find((r: any) => r.id !== first.id).id);
   assert.deepEqual(next.triggerMessages.map((m: any) => m.text), ['second', 'third']);
 });
 
@@ -229,6 +246,26 @@ test('A5.8: backend killed mid-run → same run resumes and finishes, message se
   assert.equal((await gw.state()).messages.filter((m: any) => m.text === '收到：crash test').length, 1);
   const d = await runDetail(run.id);
   assert.equal(d.steps.find((s: any) => s.name === 'send_message').isError, false);
+});
+
+test('A5.8: restart longer than 5s during a send → the delivered message is not recorded as SEND_TIMEOUT', async () => {
+  const { group } = await makeGroup(token, { agentEnabled: true });
+  await agent.control({ mode: 'normal', turnDelayMs: 300 });
+  await gw.control({ sentDelayMs: [800, 800] });
+  await gw.inject(group.gatewayGroupId, 'slow restart');
+  const run = await waitFor(async () => (await runsOf(group.id))[0], 5_000, 'run created');
+  // kill as soon as the send step exists but before it completes
+  await waitFor(async () => (await runDetail(run.id)).steps.some((s: any) => s.name === 'send_message'), 10_000, 'send step recorded');
+  await killBackend();
+  await sleep(6_000);
+  await startBackend();
+  const [done] = await settledRun(group.id);
+  const send = (await runDetail(done.id)).steps.find((s: any) => s.name === 'send_message');
+  assert.equal(send.isError, false, `send step errored: ${send.errorCode}`);
+  const landed = async () => (await gw.state()).messages.filter((m: any) => m.groupId === group.gatewayGroupId && m.text === '收到：slow restart').length;
+  await waitFor(async () => (await landed()) >= 1, 5_000, 'reply landed');
+  await sleep(1_000);
+  assert.equal(await landed(), 1, 'sent exactly once');
 });
 
 // ------------------------------------------------------------------ S7, S8 (B1)
@@ -274,6 +311,11 @@ test('S8: unresolved placeholder at step 3 → 422 with stepIndex/key, nothing s
   assert.deepEqual(ok.body.steps[2].varSources, { event: 'default', room: 'step:2' });
   assert.equal(ok.body.steps[1].resolvedVars.location, 'L2');
   assert.equal((await a.post(`/api/groups/${group.id}/sequence-runs`, { sequenceId: seq, vars: { event: 'E', time: 'T', location: 'L', room: 'R' }, stepVars: {} })).status, 201);
+  // prototype keys are not values
+  const proto = (await a.post('/api/sequences', { name: 'proto', steps: [{ index: 1, accountRole: 'admin', text: 'x {constructor}', delaySeconds: 0 }] })).body.id;
+  const pr = await a.post(`/api/sequences/${proto}/precheck`, { vars: {}, stepVars: {} });
+  assert.equal(pr.status, 422);
+  assert.equal(pr.body.error.key, 'constructor');
 });
 
 // ------------------------------------------------------------------ B2, B3

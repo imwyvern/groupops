@@ -21,6 +21,9 @@ export function installErrorHandling(app: FastifyInstance) {
     if (err.validation || err.statusCode === 400) {
       return reply.status(400).send({ error: { code: 'VALIDATION_ERROR', message: err.message, requestId } });
     }
+    if (err.statusCode >= 400 && err.statusCode < 500) { // e.g. 413 body too large, 415 media type
+      return reply.status(err.statusCode).send({ error: { code: err.code ?? `HTTP_${err.statusCode}`, message: err.message, requestId } });
+    }
     req.log.error(err);
     reply.status(500).send({ error: { code: 'INTERNAL', message: 'internal error', requestId } });
   });

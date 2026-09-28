@@ -20,8 +20,9 @@ export type ResolveResult = { ok: true; steps: ResolvedStep[] } | { ok: false; s
 const PLACEHOLDER = /\{([A-Za-z0-9_]+)\}/g;
 
 export function resolveSequence(steps: SeqStep[], vars: Record<string, string> = {}, stepVars: Record<string, Record<string, string>> = {}): ResolveResult {
-  const value: Record<string, string> = {};
-  const source: Record<string, string> = {};
+  // Null-prototype maps: `{constructor}` must be "unresolved", not Object.prototype.constructor.
+  const value: Record<string, string> = Object.create(null);
+  const source: Record<string, string> = Object.create(null);
   for (const [k, v] of Object.entries(vars)) if (v !== '') { value[k] = String(v); source[k] = 'default'; } // "" in vars = not provided
   const out: ResolvedStep[] = [];
   for (const step of [...steps].sort((a, b) => a.index - b.index)) {
@@ -32,7 +33,7 @@ export function resolveSequence(steps: SeqStep[], vars: Record<string, string> =
     const resolvedVars: Record<string, string> = {};
     const varSources: Record<string, string> = {};
     for (const [, key] of step.text.matchAll(PLACEHOLDER)) {
-      if (!(key in value)) return { ok: false, stepIndex: step.index, key };
+      if (!Object.hasOwn(value, key)) return { ok: false, stepIndex: step.index, key };
       resolvedVars[key] = value[key];
       varSources[key] = source[key];
     }

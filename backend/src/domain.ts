@@ -85,8 +85,16 @@ async function applyTerminalConsequences(c: pg.PoolClient, accountId: string, st
  * restart the gateway's window.
  */
 const RATE_LIMIT_MARGIN_SEC = 0.5;
+/**
+ * In-process hold on a monotonic clock. Wall clocks can be stepped (NTP, a VM re-syncing: the
+ * dev Postgres VM here jumps by >1s every few seconds), which would end a 2s window early and
+ * reset the gateway's timer. The persisted deadline covers restarts; while this process is alive,
+ * release additionally waits for the monotonic hold.
+ */
+const monotonicHold = new Map<string, number>();
 export async function rateLimit(c: pg.PoolClient, accountId: string, retryAfterSeconds: number) {
   const secs = Math.max(1, retryAfterSeconds) + RATE_LIMIT_MARGIN_SEC;
+  monotonicHold.set(accountId, performance.now() + secs * 1000);
   const { rows } = await c.query('SELECT status FROM accounts WHERE id = $1 FOR UPDATE', [accountId]);
   const cur = rows[0]?.status as AccountStatus | undefined;
   if (cur === 'online') await transitionAccount(c, accountId, 'online', 'rate_limited', { rateLimitedForSec: secs });
@@ -97,8 +105,15 @@ export async function rateLimit(c: pg.PoolClient, accountId: string, retryAfterS
 export async function releaseExpiredRateLimits(c: pg.PoolClient) {
   const { rows } = await c.query(
     `SELECT id FROM accounts WHERE status = 'rate_limited' AND rate_limited_until <= now() FOR UPDATE SKIP LOCKED`);
-  for (const r of rows) await transitionAccount(c, r.id, 'rate_limited', 'online');
-  return rows.length;
+  let released = 0;
+  for (const r of rows) {
+    const hold = monotonicHold.get(r.id);
+    if (hold !== undefined && performance.now() < hold) continue;
+    monotonicHold.delete(r.id);
+    await transitionAccount(c, r.id, 'rate_limited', 'online');
+    released++;
+  }
+  return released;
 }
 
 /**

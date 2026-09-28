@@ -75,7 +75,6 @@ async function consume(url: string) {
 }
 
 async function handleSafely(evt: GwEvent) {
-  seen.push({ id: evt.eventId, at: Date.now() });
   try {
     await handleEvent(evt);
   } catch (e: any) {
@@ -83,11 +82,22 @@ async function handleSafely(evt: GwEvent) {
     console.error(`[stream] event ${evt.eventId} (${evt.type}) journaled: ${e?.message ?? e}`);
     await raiseInconsistency('event_handling_failed', String(evt.eventId), `${evt.type}: ${e?.message ?? e}`);
   }
+  // Only now is the event durable (committed or journaled), so only now may the resume cursor pass it.
+  seen.push({ id: evt.eventId, at: Date.now() });
 }
 
+/** Inconsistencies that could not be persisted (DB down) are retried until they reach the operator. */
+const unsentInconsistencies: { kind: string; ref: string; message: string }[] = [];
 async function raiseInconsistency(kind: string, ref: string, message: string) {
-  try { await tx(async (c) => queueEvent(c, 'inconsistency', { kind, ref, message })); }
-  catch { console.error(`[inconsistency] ${kind} ${ref} ${message} (could not persist)`); }
+  unsentInconsistencies.push({ kind, ref, message });
+  await flushInconsistencies();
+}
+async function flushInconsistencies() {
+  while (unsentInconsistencies.length) {
+    const i = unsentInconsistencies[0];
+    try { await tx(async (c) => queueEvent(c, 'inconsistency', i)); unsentInconsistencies.shift(); }
+    catch { console.error(`[inconsistency] ${i.kind} ${i.ref} ${i.message} (queued until the database is back)`); return; }
+  }
 }
 
 /** Handle one event exactly once. Exported for tests. */
@@ -117,11 +127,12 @@ async function onMessage(c: pg.PoolClient, e: GwEvent) {
     // Our own message echoed back. If message_sent already folded it into the outbox row, this is a no-op.
     const exists = await c.query('SELECT 1 FROM messages WHERE group_id = $1 AND msg_id = $2', [g.id, e.msgId]);
     if (exists.rowCount) return;
-    // The echo can beat message_sent. Each account has at most one message in flight (the outbox
-    // serializes per account), so that row is unambiguous: attach the msgId to it now.
+    // The echo can beat message_sent. Attach it to our in-flight row now so the timeline keeps one
+    // row per message. An account can have several accepted-but-unconfirmed messages, so match on
+    // text too; if that is still ambiguous, fall back to a separate row that message_sent will fold in.
     const inflight = await c.query(
-      `SELECT id, client_msg_id FROM messages WHERE group_id = $1 AND account_id = $2 AND msg_id IS NULL
-          AND attempt_started_at IS NOT NULL AND delivery_status IN ('queued', 'accepted', 'unknown') LIMIT 2`, [g.id, own.rows[0].id]);
+      `SELECT id, client_msg_id FROM messages WHERE group_id = $1 AND account_id = $2 AND msg_id IS NULL AND text = $3
+          AND attempt_started_at IS NOT NULL AND delivery_status IN ('queued', 'accepted', 'unknown') LIMIT 2`, [g.id, own.rows[0].id, e.text ?? '']);
     if (inflight.rowCount === 1) {
       await c.query('UPDATE messages SET msg_id = $2, sent_at = $3 WHERE id = $1', [inflight.rows[0].id, e.msgId, e.sentAt]);
       queueEvent(c, 'message', { groupId: g.id, msgId: e.msgId, isOwn: true });
@@ -171,6 +182,7 @@ async function persistCursor() {
 
 let retrying = false;
 async function retryJournal() {
+  await flushInconsistencies();
   if (retrying || !fs.existsSync(JOURNAL)) return;
   retrying = true;
   try {

@@ -17,6 +17,12 @@ import { gateway, GatewayError } from './gateway.js';
 import { enterTerminal, markGroupUnreachable, onSequenceMessageOutcome, rateLimit } from './domain.js';
 
 const UNKNOWN_SETTLE_MS = 2_000; // gateway converges within 2s after a 504
+/**
+ * Monotonic start of each unknown window (this process only). A stepped wall clock must never
+ * shorten the 2s settle — resending before the gateway has converged could produce a duplicate.
+ * After a restart the persisted unknown_since is all we have (and the window has long passed).
+ */
+const unknownSinceMono = new Map<string, number>();
 const SEND_TIMEOUT_MS = 8_000;   // our HTTP timeout on `send`; a crash-orphaned claim is judged after this
 
 export async function enqueueMessage(c: pg.PoolClient, m: {
@@ -24,7 +30,7 @@ export async function enqueueMessage(c: pg.PoolClient, m: {
 }) {
   const { rows } = await c.query(
     `INSERT INTO messages (group_id, client_msg_id, sender_platform_user_id, account_id, is_own, text, sent_at, delivery_status, source)
-     VALUES ($1, $2, $3, $4, true, $5, now(), 'queued', $6) RETURNING id`,
+     VALUES ($1, $2, $3, $4, true, $5, date_trunc('milliseconds', now()), 'queued', $6) RETURNING id`,
     [m.groupId, m.clientMsgId, m.platformUserId, m.accountId, m.text, m.source]);
   queueEvent(c, 'message', { groupId: m.groupId, msgId: null, clientMsgId: m.clientMsgId, isOwn: true });
   nudge();
@@ -41,6 +47,7 @@ async function tick() {
   if (running) return;
   running = true;
   try {
+    await cancelOrphanedByTerminal();
     await dispatch();
     await resolveUnknown();
   } catch (e) { console.error('[outbox]', e); }
@@ -55,6 +62,26 @@ export async function startOutbox() {
       WHERE delivery_status = 'queued' AND attempt_started_at IS NOT NULL`, [SEND_TIMEOUT_MS]);
   timer = setInterval(tick, 200);
   timer.unref();
+}
+
+/**
+ * A message can return to `queued` after its account went terminal (e.g. the 504 resend path, or
+ * a send that was in flight when the terminal cascade ran and was therefore skipped by it). Such a
+ * row would never be dispatched again, so it gets the same outcome the cascade gives: cancelled.
+ */
+async function cancelOrphanedByTerminal() {
+  await tx(async (c) => {
+    const { rows } = await c.query(
+      `UPDATE messages m SET delivery_status = 'cancelled', fail_code = 'ACCOUNT_TERMINAL'
+         FROM accounts a
+        WHERE a.id = m.account_id AND a.status IN ('suspended', 'session_expired')
+          AND m.delivery_status = 'queued' AND m.attempt_started_at IS NULL
+        RETURNING m.group_id, m.client_msg_id`);
+    for (const m of rows) {
+      queueEvent(c, 'message_status', { groupId: m.group_id, clientMsgId: m.client_msg_id, deliveryStatus: 'cancelled' });
+      await onSequenceMessageOutcome(c, m.client_msg_id, 'cancelled');
+    }
+  });
 }
 
 /** Head-of-line message per online account, if it is ready to go. */
@@ -117,6 +144,7 @@ async function handleSendError(c: pg.PoolClient, m: any, e: GatewayError) {
       await fail(c, m, e.code);
       return;
     case 'NETWORK_TIMEOUT':
+      unknownSinceMono.set(m.client_msg_id, performance.now());
       await c.query(`UPDATE messages SET delivery_status = 'unknown', unknown_since = now() WHERE id = $1 AND delivery_status = 'queued'`, [m.id]);
       queueEvent(c, 'message_status', { groupId: m.group_id, clientMsgId: m.client_msg_id, deliveryStatus: 'unknown' });
       return;
@@ -160,8 +188,11 @@ async function resolveUnknown() {
     await tx(async (c) => {
       const cur = await c.query(`SELECT delivery_status FROM messages WHERE id = $1 FOR UPDATE`, [m.id]);
       if (cur.rows[0]?.delivery_status !== 'unknown') return; // resolved concurrently (e.g. message_sent arrived)
-      if (landed) return markSent(c, m.client_msg_id, landed.msgId, landed.sentAt);
+      if (landed) { unknownSinceMono.delete(m.client_msg_id); return markSent(c, m.client_msg_id, landed.msgId, landed.sentAt); }
       if (Number(m.unknown_age_ms) < UNKNOWN_SETTLE_MS) return;
+      const mono = unknownSinceMono.get(m.client_msg_id);
+      if (mono !== undefined && performance.now() - mono < UNKNOWN_SETTLE_MS) return;
+      unknownSinceMono.delete(m.client_msg_id);
       if (m.resend_count < 1) {
         await c.query(
           `UPDATE messages SET delivery_status = 'queued', attempt_started_at = NULL, unknown_since = NULL, resend_count = resend_count + 1
